@@ -1,107 +1,47 @@
-# ⏰ Reloj Analógico (Allegro)
+# ⏰ Reloj Analógico (con Hora del Sistema)
 
-Este proyecto contiene una demo en C++ que dibuja un **reloj analógico** en una ventana usando Allegro 5 y sus addons. El código principal es `RelojAnaligico.cpp`.
-
----
-
-## ✨ Vista rápida
-
-- Tamaño de la ventana: 800×600
-- Centro del reloj: (400, 300)
-- Radio del reloj: 250 px
-- FPS objetivo: ~60 (usa `ALLEGRO_TIMER` con 1/60)
-- Fuente: `al_create_builtin_font()` (fuente interna de Allegro)
+Este proyecto es una simulación de un **reloj analógico funcional** creada en C++ con la biblioteca **Allegro 5**. A diferencia de otras versiones, este reloj **lee la hora actual de tu computadora** y la muestra en tiempo real.
 
 ---
 
-## ¿Qué hace el programa?
+## 💡 Conceptos Técnicos Clave
 
-- Inicializa Allegro y los addons: primitives, font y ttf.
-- Crea una ventana y un `ALLEGRO_TIMER` que actualiza la pantalla ~60 veces por segundo.
-- Obtiene la hora local del sistema (hora, minuto, segundo) y calcula los ángulos de las manecillas:
-	- Hora: (horas % 12 + minutos/60.0) * 30 grados
-	- Minuto: (minutos + segundos/60.0) * 6 grados
-	- Segundo: segundos * 6 grados
-- Dibuja la cara del reloj, marcas de horas (con diferente grosor para 12/3/6/9), contorno, manecillas y números (1–12).
-- Espera al evento `ALLEGRO_EVENT_DISPLAY_CLOSE` para cerrar la aplicación.
+* **Biblioteca Utilizada:** El proyecto se basa en **Allegro 5** y sus addons para dibujar formas (`allegro_primitives`) y manejar fuentes (`allegro_font`, `allegro_ttf`).
+* **Lectura de Hora del Sistema:** Es la característica principal. Utiliza la biblioteca `<ctime>` (con `time(0)` y `localtime()`) para obtener la hora, minutos y segundos reales del sistema operativo en cada fotograma.
+* **Bucle de Eventos (Event-Driven):** Este programa utiliza la forma robusta de Allegro para manejar el tiempo. Un `ALLEGRO_TIMER` se ejecuta 60 veces por segundo (FPS) y un `ALLEGRO_EVENT_QUEUE` espera los eventos (como el "tick" del temporizador o el cierre de la ventana) para actualizar la pantalla.
+* **Cálculos Trigonométricos:** La posición de todas las manecillas y los números se calcula dinámicamente usando trigonometría (`cos` y `sin`) para convertir los ángulos en coordenadas (x, y).
+* **Movimiento Suave:** El programa calcula la posición de las manecillas de hora y minuto usando fracciones (`minutos / 60.0`), lo que permite un movimiento fluido y realista en lugar de saltos discretos.
 
 ---
 
-## Dependencias
+## ⚙️ Características Visuales
 
-- Allegro 5
-- Addon: `allegro_primitives`
-- Addon: `allegro_font`
-- Addon: `allegro_ttf`
-
-Instala Allegro y los paquetes correspondientes en tu sistema (en MSYS2/MinGW suelen ser `mingw-w64-x86_64-allegro` y paquetes relacionados).
-
----
-
-## Cómo compilar
-
-Ejemplo genérico (si Allegro está en el PATH y las bibliotecas están instaladas):
-
-```bash
-g++ RelojAnaligico.cpp -o RelojAnaligico.exe -lallegro -lallegro_primitives -lallegro_font -lallegro_ttf
-```
-
-Ejemplo usando MSYS2/MinGW64 (ajusta la ruta al compilador si es necesario):
-
-```bash
-C:/msys64/mingw64/bin/g++.exe RelojAnaligico.cpp -o RelojAnaligico.exe -lallegro -lallegro_primitives -lallegro_font -lallegro_ttf
-```
-
-Si obtienes errores de enlace relacionados con `main`, añade `-lallegro_main` al final de la línea de enlace.
+* **Cara del Reloj:** Un círculo blanco sobre un fondo rosa, con un borde negro.
+* **Números (1-12):** Los números están correctamente posicionados alrededor de la esfera, con el "12" en la parte superior.
+* **Marcadores de Hora:** El reloj dibuja 12 marcadores. Las posiciones cardinales (12, 3, 6 y 9) se dibujan en **rojo** y con mayor grosor, mientras que las demás horas están en azul.
+* **Manecillas (Horas, Minutos, Segundos):**
+    * **Hora:** Corta y gruesa.
+    * **Minuto:** Longitud media y grosor medio.
+    * **Segundo:** Larga, fina y de color rojo, se mueve cada segundo.
 
 ---
 
-## Cómo ejecutar
+## ⌨️ Controles
 
-Desde una terminal en la carpeta del proyecto:
-
-```bash
-./RelojAnaligico.exe    # en MSYS2 / Linux con compatibilidad
-# o en PowerShell / CMD de Windows:
-.\RelojAnaligico.exe
-```
-
-La ventana mostrará un fondo rosa, la cara del reloj blanca, marcadores y manecillas que indican la hora actual del sistema.
+* **Cerrar la ventana:** Es la única forma de interacción, lo que finaliza el programa.
 
 ---
 
-## Controles
+## 🔧 Cómo Compilar
 
-- Cierra la ventana con el botón de cerrar (la aplicación escucha `ALLEGRO_EVENT_DISPLAY_CLOSE`).
-
----
-
-## Detalles de implementación importantes
-
-- Usa `ALLEGRO_TIMER` para actualizar la animación a ~60 FPS en lugar de depender sólo de `al_rest`.
-- Los números del reloj se dibujan con `al_draw_text` usando la fuente integrada (`al_create_builtin_font()`). Si prefieres una fuente TTF, carga una con `al_load_ttf_font()`.
-- Para los ángulos se utiliza una constante `pi = 3.1416` y conversiones de grados a radianes.
+Para compilar este proyecto, necesitas tener la biblioteca **Allegro 5** instalada en tu sistema y enlazar correctamente los siguientes addons:
+* `allegro`
+* `allegro_primitives`
+* `allegro_font`
+* `allegro_ttf`
 
 ---
 
-## Sugerencias de mejoras
+## 📦 Ejecutable
 
-1. Suavizar la animación de la manecilla de los segundos (interpolación entre ticks) o usar sub-segundos si deseas transición continua.
-2. Reemplazar la fuente integrada por una TTF para mejor aspecto (usar `al_load_ttf_font("miFuente.ttf", tamaño, 0)`).
-3. Añadir opciones de configuración: tamaño de ventana, color de fondo, estilo de marcadores.
-4. Añadir atajos de teclado: por ejemplo `ESC` para cerrar, `F` para alternar fullscreen, `+/-` para cambiar velocidad de simulación.
-5. Soporte HiDPI y reescalado al cambiar el tamaño de la ventana.
-
----
-
-## ¿Quieres que haga esto por ti?
-
-- Puedo añadir `ESC` para cerrar, soporte para fullscreen o atajos ahora mismo.
-- Puedo generar una tarea de VSCode (tasks.json) que compile con tu toolchain de MSYS2/MinGW.
-
-Indica qué prefieres y lo implemento.
-
----
-
-Archivo fuente: `RelojAnaligico.cpp`
-
+El archivo ejecutable ya compilado (`RelojAnaligico`) se encuentra en esta misma carpeta, junto al código fuente.
