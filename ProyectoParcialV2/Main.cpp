@@ -44,6 +44,36 @@ struct Blob {
     float colorShift;
 };
 
+// forward declaration necesaria porque ElectricArc usa Punto3D
+struct Punto3D;
+
+// Partícula para efecto de ensamblado
+struct Particle {
+    float x, y, z;
+    float tx, ty, tz; // target
+    float vx, vy, vz;
+    float speed;
+    float size;
+    // previous position for trail rendering
+    float prevX, prevY, prevZ;
+};
+
+// Arco eléctrico entre dos nodos (polilínea con vida)
+struct ElectricArc {
+    int aIndex, bIndex; // índices de puntos en esfera.puntos
+    std::vector<Punto3D> pts; // puntos en el arco (mundo local)
+    float life;
+    float ttl;
+};
+
+// Pulso visual breve (al llegar partícula)
+struct Pulse {
+    float x,y,z;
+    float life;
+    float ttl;
+    float size;
+};
+
 // Estructura para representar un punto 3D con su posición original y parámetros de animación
 struct Punto3D {
     float x, y, z;
@@ -85,6 +115,23 @@ struct Esfera {
     std::vector<CoreRay> coreRays;
     // Posición de la ventana en pantalla (para interacción multi-instancia)
     int windowX, windowY;
+    // Estado para modo "construcción" (mostrar partes por etapas)
+    int buildStage;
+    float buildStageTimer;
+    float buildStageDuration;
+    int maxBuildStages;
+    bool buildMode;
+    // Partículas para ensamblaje progresivo
+    std::vector<Particle> particles;
+    // Arcos eléctricos dinámicos
+    std::vector<ElectricArc> arcs;
+    // Pulsos temporales creados cuando partículas alcanzan targets
+    std::vector<Pulse> pulses;
+    // opciones de visualización/tuning
+    bool showTrails;
+    bool showRibbons;
+    bool showHUD;
+    float globalSpeedMul;
 };
 
 // Estructura para almacenar puntos preparados para dibujo con profundidad
@@ -147,6 +194,21 @@ void inicializarEsfera(Esfera& esfera) {
     esfera.faseAurora = 0.0f; esfera.intensidadAurora = 0.0f;
         esfera.windowX = 0; esfera.windowY = 0;
 
+    // Modo construcción: por defecto activo para mostrar la formación por etapas
+    esfera.buildStage = 0;
+    esfera.buildStageTimer = 0.0f;
+    esfera.buildStageDuration = 1.1f; // segundos por etapa (ajustable)
+    esfera.maxBuildStages = 8; // número total de etapas (0..7)
+    esfera.buildMode = true;
+
+    // visual tuning defaults
+    esfera.showTrails = true;
+    esfera.showRibbons = false;
+    esfera.showHUD = true;
+    esfera.globalSpeedMul = 1.0f;
+
+    esfera.pulses.clear();
+
     // Esquema de color fijo
     esfera.r = 255; esfera.g = 140; esfera.b = 50;
 
@@ -186,6 +248,30 @@ void inicializarEsfera(Esfera& esfera) {
         p.prevX = p.x; p.prevY = p.y; p.prevZ = p.z;
         p.mass = 1.0f + (float)rand() / RAND_MAX * 0.6f;
         esfera.puntos.push_back(p);
+    }
+
+    // Inicializar partículas para efecto de ensamblaje (más que puntos para un efecto visual)
+    esfera.particles.clear();
+    int partCount = NUM_PUNTOS * 2 / 1; // densidad de partículas (ajustable)
+    for (int i = 0; i < partCount; ++i) {
+        Particle par;
+        // iniciar dispersas alrededor de la escena
+        float dist = 400.0f + (float)rand() / RAND_MAX * 800.0f;
+        float ang = ((float)rand() / RAND_MAX) * 2.0f * (float)ALLEGRO_PI;
+        float elev = ((float)rand() / RAND_MAX - 0.5f) * 1.6f;
+        par.x = cosf(ang) * dist;
+        par.y = elev * 300.0f;
+        par.z = sinf(ang) * dist;
+        // asignar target a un punto de la esfera (aleatorio)
+        int targetIdx = rand() % esfera.puntos.size();
+        par.tx = esfera.puntos[targetIdx].xOriginal;
+        par.ty = esfera.puntos[targetIdx].yOriginal;
+        par.tz = esfera.puntos[targetIdx].zOriginal;
+        par.vx = par.vy = par.vz = 0.0f;
+        par.speed = 120.0f + (float)rand() / RAND_MAX * 180.0f;
+        par.size = 1.0f + (float)rand() / RAND_MAX * 3.5f;
+        par.prevX = par.x; par.prevY = par.y; par.prevZ = par.z;
+        esfera.particles.push_back(par);
     }
 
     // Inicializar blobs del núcleo tipo lava/slime
@@ -237,6 +323,26 @@ void inicializarEsfera(Esfera& esfera) {
         r.branchProb = 0.06f + ((float)rand() / RAND_MAX) * 0.12f;
         r.intensity = 0.6f + ((float)rand() / RAND_MAX) * 0.8f;
         esfera.coreRays.push_back(r);
+    }
+
+    // Inicializar algunos arcos eléctricos entre nodos (efecto chisporroteante)
+    esfera.arcs.clear();
+    int initialArcs = 14;
+    for (int a = 0; a < initialArcs; ++a) {
+        ElectricArc arc;
+        arc.aIndex = rand() % esfera.puntos.size();
+        // buscar un punto vecino aleatorio
+        arc.bIndex = rand() % esfera.puntos.size();
+        arc.life = 0.0f;
+        arc.ttl = 0.6f + (float)rand() / RAND_MAX * 1.4f;
+        // generar una polilínea base (se regenerará/animará después)
+        int segs = 6 + (rand() % 6);
+        arc.pts.clear();
+        for (int s = 0; s < segs; ++s) {
+            Punto3D pp; pp.x = pp.y = pp.z = 0.0f; pp.fase = 0.0f; pp.velocidad = 0.0f; pp.prevX = pp.prevY = pp.prevZ = 0.0f; pp.mass = 1.0f;
+            arc.pts.push_back(pp);
+        }
+        esfera.arcs.push_back(arc);
     }
 }
 
@@ -404,7 +510,91 @@ void actualizarEsfera(Esfera& esfera, int prevWX, int prevWY, int currWX, int cu
             r.intensity = 0.6f + ((float)rand() / RAND_MAX) * 0.8f;
             r.white = (rand() % 2 == 0);
         }
+
     }
+
+    // Actualizar partículas de ensamblaje
+    for (size_t pi = 0; pi < esfera.particles.size(); ++pi) {
+        Particle &p = esfera.particles[pi];
+        // guardar posición anterior para trails
+        p.prevX = p.x; p.prevY = p.y; p.prevZ = p.z;
+        // fuerza hacia el objetivo
+        float dx = p.tx - p.x; float dy = p.ty - p.y; float dz = p.tz - p.z;
+        float dist = sqrtf(dx*dx + dy*dy + dz*dz) + 1e-6f;
+        float ax = (dx / dist) * (p.speed * 0.02f);
+        float ay = (dy / dist) * (p.speed * 0.02f);
+        float az = (dz / dist) * (p.speed * 0.02f);
+        // integrar velocidad
+        p.vx += ax * dt;
+        p.vy += ay * dt;
+        p.vz += az * dt;
+        // damping
+        p.vx *= 0.96f; p.vy *= 0.96f; p.vz *= 0.96f;
+        p.x += p.vx * dt * 60.0f;
+        p.y += p.vy * dt * 60.0f;
+        p.z += p.vz * dt * 60.0f;
+        // si está muy cerca, ligar al objetivo
+        if (dist < 6.0f) {
+            p.x = p.tx; p.y = p.ty; p.z = p.tz;
+            p.vx = p.vy = p.vz = 0.0f;
+            // crear pulso visual al llegar
+            Pulse pu; pu.x = p.tx; pu.y = p.ty; pu.z = p.tz; pu.life = 0.0f; pu.ttl = 0.45f + ((float)rand()/RAND_MAX)*0.35f; pu.size = 6.0f + ((float)rand()/RAND_MAX)*8.0f;
+            esfera.pulses.push_back(pu);
+        }
+    }
+
+    // actualizar pulses
+    for (size_t i = 0; i < esfera.pulses.size();) {
+        esfera.pulses[i].life += dt;
+        if (esfera.pulses[i].life >= esfera.pulses[i].ttl) {
+            esfera.pulses.erase(esfera.pulses.begin() + i);
+        } else ++i;
+    }
+
+    // Actualizar arcos eléctricos
+    for (size_t ai = 0; ai < esfera.arcs.size(); ++ai) {
+        ElectricArc &arc = esfera.arcs[ai];
+        arc.life += dt;
+        if (arc.life >= arc.ttl) {
+            // regenerar arco: escoger nuevos índices y recomponer puntos
+            arc.aIndex = rand() % esfera.puntos.size();
+            arc.bIndex = rand() % esfera.puntos.size();
+            arc.life = 0.0f;
+            arc.ttl = 0.4f + (float)rand() / RAND_MAX * 1.2f;
+            int segs = 4 + (rand() % 8);
+            arc.pts.clear();
+            for (int s = 0; s < segs; ++s) {
+                Punto3D q; q.x = q.y = q.z = 0.0f; q.fase = 0.0f; q.velocidad = 0.0f; q.prevX = q.prevY = q.prevZ = 0.0f; q.mass = 1.0f;
+                arc.pts.push_back(q);
+            }
+        }
+        // animar puntos con jitter entre endpoints
+        Punto3D pa = esfera.puntos[arc.aIndex]; Punto3D pb = esfera.puntos[arc.bIndex];
+        for (size_t s = 0; s < arc.pts.size(); ++s) {
+            float t = (float)s / (float)(arc.pts.size() - 1 + 1e-6f);
+            float baseX = pa.xOriginal + (pb.xOriginal - pa.xOriginal) * t;
+            float baseY = pa.yOriginal + (pb.yOriginal - pa.yOriginal) * t;
+            float baseZ = pa.zOriginal + (pb.zOriginal - pa.zOriginal) * t;
+            float jitter = 12.0f * (1.0f - fabsf(0.5f - t) * 2.0f);
+            float jx = sinf(esfera.tiempo * 8.0f + s * 1.9f + ai) * jitter * 0.6f;
+            float jy = cosf(esfera.tiempo * 7.2f + s * 1.3f + ai) * jitter * 0.45f;
+            float jz = sinf(esfera.tiempo * 6.4f + s * 2.3f + ai) * jitter * 0.5f;
+            arc.pts[s].x = baseX + jx;
+            arc.pts[s].y = baseY + jy;
+            arc.pts[s].z = baseZ + jz;
+        }
+    }
+
+    // Avanzar etapas de construcción si está activo
+    if (esfera.buildMode) {
+        esfera.buildStageTimer += dt;
+        if (esfera.buildStageTimer >= esfera.buildStageDuration) {
+            esfera.buildStageTimer = 0.0f;
+            esfera.buildStage++;
+            if (esfera.buildStage >= esfera.maxBuildStages) esfera.buildStage = 0;
+        }
+    }
+
 }
 
 void init_opengl(int ancho, int alto) {
@@ -778,8 +968,30 @@ static void draw_core(const Esfera& esfera, float tiempo) {
 
     int lon = 28, lat = 18;
     // Dibujar cada blob con varias capas (nucleo brillante, cuerpo y halo suave)
-    for (size_t i = 0; i < esfera.blobs.size(); ++i) {
+    // Si estamos en etapa de construcción 3, revelar blobs progresivamente
+    int buildStage_core = esfera.buildMode ? esfera.buildStage : -1;
+    float buildProg_core = (esfera.buildMode && esfera.buildStageDuration > 0.0f) ? (esfera.buildStageTimer / esfera.buildStageDuration) : 1.0f;
+    if (buildProg_core < 0.0f) buildProg_core = 0.0f; if (buildProg_core > 1.0f) buildProg_core = 1.0f;
+    int totalBlobs = (int)esfera.blobs.size();
+    int fullBlobs = totalBlobs;
+    float lastBlobFrac = 1.0f;
+    if (esfera.buildMode && buildStage_core == 3) {
+        float reveal = buildProg_core * (float)totalBlobs;
+        fullBlobs = (int)floorf(reveal);
+        lastBlobFrac = reveal - (float)fullBlobs;
+    }
+    for (int i = 0; i < totalBlobs; ++i) {
         const Blob& b = esfera.blobs[i];
+        // si no visible aún, saltar
+        if (esfera.buildMode && buildStage_core == 3) {
+            if (i > fullBlobs) continue;
+        }
+        float vis = 1.0f;
+        if (esfera.buildMode && buildStage_core == 3) {
+            if (i < fullBlobs) vis = 1.0f;
+            else if (i == fullBlobs) vis = lastBlobFrac;
+            else vis = 0.0f;
+        }
         // calcular color base (puedes tunear para lava: rojo/amarillo o slime: verde/azul)
         float hueBase = fmodf(0.3f + b.colorShift * 0.5f + sinf(esfera.faseAurora * 0.4f + i * 0.7f) * 0.06f, 1.0f);
         float rb = 0.3f + 0.7f * sinf(6.28318f * (hueBase + 0.0f));
@@ -789,8 +1001,8 @@ static void draw_core(const Esfera& esfera, float tiempo) {
         // Capa 1: núcleo brillante pequeño
         glPushMatrix();
         glTranslatef(b.x, b.y, b.z);
-        float innerScale = b.r * 0.5f * (0.9f + 0.15f * sinf(tiempo * b.speed + b.phase));
-        glColor4f(rb * 1.3f, gb * 1.2f, bb * 1.1f, 0.55f * powf(esfera.progresoFormacion, 1.6f));
+        float innerScale = b.r * 0.5f * (0.9f + 0.15f * sinf(tiempo * b.speed + b.phase)) * (0.25f + 0.75f * vis);
+        glColor4f(rb * 1.3f, gb * 1.2f, bb * 1.1f, 0.55f * powf(esfera.progresoFormacion, 1.6f) * vis);
         glScalef(innerScale, innerScale, innerScale);
         gluSphere(quad, 1.0, lon, lat);
         glPopMatrix();
@@ -798,15 +1010,14 @@ static void draw_core(const Esfera& esfera, float tiempo) {
         // Capa 2: cuerpo principal
         glPushMatrix();
         glTranslatef(b.x, b.y, b.z);
-        float midScale = b.r * (0.85f + 0.18f * sinf(tiempo * (b.speed * 0.8f) + b.phase * 0.9f));
-        glColor4f(rb, gb, bb, 0.36f * powf(esfera.progresoFormacion, 1.4f));
+        float midScale = b.r * (0.85f + 0.18f * sinf(tiempo * (b.speed * 0.8f) + b.phase * 0.9f)) * (0.25f + 0.75f * vis);
+        glColor4f(rb, gb, bb, 0.36f * powf(esfera.progresoFormacion, 1.4f) * vis);
         glScalef(midScale, midScale, midScale);
         gluSphere(quad, 1.0, lon, lat);
         glPopMatrix();
 
         // Capa 3: halo suave con puntos grandes para glow
-        glPointSize(8.0f + (i % 3) * 2.0f);
-        float haloAlpha = 0.12f * (1.2f - (float)i / (float)esfera.blobs.size()) * (0.8f + 0.2f * sinf(tiempo * 1.2f + i));
+        float haloAlpha = 0.12f * (1.2f - (float)i / (float)esfera.blobs.size()) * (0.8f + 0.2f * sinf(tiempo * 1.2f + i)) * vis;
         glBegin(GL_POINTS);
         glColor4f(rb * 0.9f, gb * 1.0f, bb * 1.05f, haloAlpha);
         // Dibujar varios puntos alrededor para dar halo difuso
@@ -841,7 +1052,21 @@ static void draw_core(const Esfera& esfera, float tiempo) {
                 float bb_ = 0.4f + 0.6f * sinf(6.28318f * (hueB + 0.66f));
 
                 // dibujar una linea de pequeñas esferas entre a y b
+                // si estamos en etapa de construcción 3, revelar progresivamente los pasos
+                int maxSteps = CORE_FILAMENT_STEPS;
+                float lastStepFrac = 1.0f;
+                if (esfera.buildMode && buildStage_core == 3) {
+                    float reveal = buildProg_core * (float)(CORE_FILAMENT_STEPS + 1);
+                    int full = (int)floorf(reveal);
+                    maxSteps = full;
+                    lastStepFrac = reveal - (float)full;
+                    if (maxSteps < 0) maxSteps = 0;
+                    if (maxSteps > CORE_FILAMENT_STEPS) maxSteps = CORE_FILAMENT_STEPS;
+                }
                 for (int s = 0; s <= CORE_FILAMENT_STEPS; ++s) {
+                    if (esfera.buildMode && buildStage_core == 3) {
+                        if (s > maxSteps) break;
+                    }
                     float t = (float)s / (float)CORE_FILAMENT_STEPS;
                     float ix = a.x + dx * t + sinf(tiempo * 2.0f + i * 0.7f) * 2.0f * (0.5f - t);
                     float iy = a.y + dy * t + cosf(tiempo * 1.5f + j * 0.5f) * 1.6f * (t - 0.5f);
@@ -852,8 +1077,16 @@ static void draw_core(const Esfera& esfera, float tiempo) {
                     float rcol = (ra + rb_) * 0.5f;
                     float gcol = (ga + gb_) * 0.5f;
                     float bcol = (ba + bb_) * 0.5f;
-                    glColor4f(rcol, gcol, bcol, 0.12f * (1.0f - t));
-                    glScalef(scale, scale, scale);
+                    float alpha = 0.12f * (1.0f - t);
+                    // si es el último paso parcial, escalar alpha/scale
+                    if (esfera.buildMode && buildStage_core == 3 && s == maxSteps && lastStepFrac < 1.0f) {
+                        alpha *= lastStepFrac;
+                        float visScale = 0.35f + 0.65f * lastStepFrac;
+                        glScalef(scale * visScale, scale * visScale, scale * visScale);
+                    } else {
+                        glScalef(scale, scale, scale);
+                    }
+                    glColor4f(rcol, gcol, bcol, alpha);
                     gluSphere(quad, 1.0, 8, 6);
                     glPopMatrix();
                 }
@@ -1010,21 +1243,40 @@ static void draw_core(const Esfera& esfera, float tiempo) {
 static void draw_aurora_glow(const Esfera& esfera, float tiempo) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    int maxHebras = std::min((int)esfera.hebrasAurora.size(), 60);
+    // Control de etapa/progreso para revelado
+    int buildStage = esfera.buildMode ? esfera.buildStage : -1;
+    float buildProg = (esfera.buildMode && esfera.buildStageDuration > 0.0f) ? (esfera.buildStageTimer / esfera.buildStageDuration) : 1.0f;
+    if (buildProg < 0.0f) buildProg = 0.0f; if (buildProg > 1.0f) buildProg = 1.0f;
+
+    int baseMaxHebras = std::min((int)esfera.hebrasAurora.size(), 60);
+    int maxHebras = baseMaxHebras;
+    if (esfera.buildMode && buildStage == 5) {
+        maxHebras = std::max(1, (int)floorf(baseMaxHebras * buildProg));
+    }
 
     for (int h = 0; h < maxHebras; ++h) {
         const HebraAurora& hebra = esfera.hebrasAurora[h];
         // cada hebra será una tira con varios segmentos
         int segments = 28;
+        // si estamos en la etapa de revelado, reducir la amplitud/longitud inicialmente
+        float lengthMul = 1.0f;
+        float ampMul = 1.0f;
+        float alphaMul = 1.0f;
+        if (esfera.buildMode && buildStage == 5) {
+            lengthMul = 0.25f + 0.75f * buildProg;
+            ampMul = 0.25f + 0.75f * buildProg;
+            alphaMul = buildProg;
+        }
+
         float baseRadius = RADIO_ESFERA * (1.02f + 0.15f * (sinf(hebra.fase + tiempo * hebra.velocidad)));
 
         glBegin(GL_TRIANGLE_STRIP);
         for (int s = 0; s <= segments; ++s) {
             float t = (float)s / (float)segments;
             // Longitud y desplazamiento animado
-            float ang = hebra.anguloBase + t * hebra.longitud * 0.12f + sinf(hebra.desplazamientoRuido + tiempo * 0.6f + h * 0.07f) * 0.4f;
+            float ang = hebra.anguloBase + t * hebra.longitud * 0.12f * lengthMul + sinf(hebra.desplazamientoRuido + tiempo * 0.6f + h * 0.07f) * 0.4f * lengthMul;
             // altura sobre la esfera
-            float elev = sinf(t * (float)ALLEGRO_PI) * hebra.amplitud * (0.6f + 0.4f * sinf(tiempo * hebra.velocidad + hebra.fase));
+            float elev = sinf(t * (float)ALLEGRO_PI) * hebra.amplitud * (0.6f + 0.4f * sinf(tiempo * hebra.velocidad + hebra.fase)) * ampMul;
 
             // posición central de la cinta
             float nx = cosf(ang);
@@ -1044,8 +1296,8 @@ static void draw_aurora_glow(const Esfera& esfera, float tiempo) {
             float gcol = 0.15f * (1.0f - mixv) + 0.7f * mixv;
             float bcol = 0.6f * (1.0f - mixv) + 1.0f * mixv; // neon cyan
 
-            float alphaOut = 0.38f * (1.0f - t) * (0.8f + 0.6f * esfera.intensidadAurora);
-            float alphaIn = 0.18f * (t) * (0.8f + 0.6f * esfera.intensidadAurora);
+            float alphaOut = 0.38f * (1.0f - t) * (0.8f + 0.6f * esfera.intensidadAurora) * alphaMul;
+            float alphaIn = 0.18f * (t) * (0.8f + 0.6f * esfera.intensidadAurora) * alphaMul;
 
             glColor4f(rcol, gcol, bcol, alphaOut);
             glVertex3f(cxOut, cyOut, czOut);
@@ -1072,15 +1324,23 @@ static void draw_outer_ring(const Esfera& esfera, float tiempo) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDisable(GL_CULL_FACE);
 
+    // control de etapa/progreso para revelado
+    int buildStage = esfera.buildMode ? esfera.buildStage : -1;
+    float buildProg = (esfera.buildMode && esfera.buildStageDuration > 0.0f) ? (esfera.buildStageTimer / esfera.buildStageDuration) : 1.0f;
+    if (buildProg < 0.0f) buildProg = 0.0f; if (buildProg > 1.0f) buildProg = 1.0f;
+
     for (int r = 0; r < rings; ++r) {
         float t = (float)r / (float)(rings - 1);
         float innerR = baseR + t * RADIO_ESFERA * 0.08f + sinf(tiempo * (0.2f + r*0.05f)) * 6.0f;
         float outerR = innerR + 10.0f + r * 6.0f;
         float hueShift = esfera.faseAurora * 0.5f + r * 0.6f;
-
         glBegin(GL_TRIANGLE_STRIP);
+        // si estamos en etapa de revelado del anillo, calcular ángulo máximo visible
+        float sweepAngle = 2.0f * (float)ALLEGRO_PI;
+        if (esfera.buildMode && buildStage == 6) sweepAngle = 2.0f * (float)ALLEGRO_PI * buildProg;
         for (int i = 0; i <= segments; ++i) {
             float a = (float)i / (float)segments * 2.0f * (float)ALLEGRO_PI;
+            if (esfera.buildMode && buildStage == 6 && a > sweepAngle) break;
             // ligera oscilación para darle vida
             float wobble = sinf(a * 6.0f + tiempo * (0.6f + r*0.2f)) * 3.0f * (1.0f - t);
             float xOut = cosf(a) * (outerR + wobble);
@@ -1120,7 +1380,7 @@ static void draw_outer_ring(const Esfera& esfera, float tiempo) {
 }
 
 // Dibujar un campo de estrellas distante (fondo)
-static void draw_starfield(float tiempo) {
+static void draw_starfield(float tiempo, float reveal = 1.0f) {
     static bool init = false;
     static std::vector<std::tuple<float,float,float,float>> stars;
     if (!init) {
@@ -1147,7 +1407,8 @@ static void draw_starfield(float tiempo) {
     for (const auto &s : stars) {
         float x,y,z,b; std::tie(x,y,z,b) = s;
         float flick = 0.6f + 0.4f * (0.5f + 0.5f * sinf(tiempo * 1.3f + x * 0.0012f));
-        glColor4f(0.6f * b * flick, 0.7f * b * flick, 1.0f * b * flick, 0.9f * flick * 0.6f);
+        float alpha = 0.9f * flick * 0.6f * reveal;
+        glColor4f(0.6f * b * flick, 0.7f * b * flick, 1.0f * b * flick, alpha);
         glVertex3f(x, y, z);
     }
     glEnd();
@@ -1162,10 +1423,24 @@ static void draw_fresnel_shells(const Esfera& esfera, float tiempo) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDisable(GL_LIGHTING);
+    // control de etapa/progreso para revelado
+    int buildStage = esfera.buildMode ? esfera.buildStage : -1;
+    float buildProg = (esfera.buildMode && esfera.buildStageDuration > 0.0f) ? (esfera.buildStageTimer / esfera.buildStageDuration) : 1.0f;
+    if (buildProg < 0.0f) buildProg = 0.0f; if (buildProg > 1.0f) buildProg = 1.0f;
+
     for (int layer = 0; layer < 4; ++layer) {
         float t = (float)layer / 4.0f;
+        // si estamos revelando, aumentar escala desde pequeño y multiplicar alpha
         float scale = baseR * (1.0f + 0.02f * layer + 0.02f * sinf(tiempo * (0.6f + layer * 0.2f)));
         float alpha = 0.14f * (1.0f - t) * powf(esfera.progresoFormacion, 1.4f);
+        if (esfera.buildMode && buildStage == 4) {
+            float sprog = 0.3f + 0.7f * buildProg; // empezar más pequeño
+            scale *= sprog;
+            alpha *= buildProg;
+        }
+        // pulso especular/luces que recorren las fresnel shells para dar sensación de 'pulido'
+        float pulse = 0.6f + 0.4f * (0.5f + 0.5f * sinf(tiempo * 2.0f + layer * 0.9f));
+        alpha *= (0.8f + 0.5f * pulse);
         float hue = 0.5f + 0.5f * sinf(esfera.faseAurora * 0.8f + layer * 1.1f);
         float rcol = 0.4f * hue + 0.2f;
         float gcol = 0.2f * (1.0f - hue) + 0.15f;
@@ -1187,6 +1462,11 @@ static void draw_fresnel_shells(const Esfera& esfera, float tiempo) {
 void dibujarEsfera(Esfera& esfera) {
     float tiempo = al_get_time();
 
+    // Información de etapa de construcción y progreso (0..1)
+    int buildStage = esfera.buildMode ? esfera.buildStage : -1;
+    float buildProg = (esfera.buildMode && esfera.buildStageDuration > 0.0f) ? (esfera.buildStageTimer / esfera.buildStageDuration) : 1.0f;
+    if (buildProg < 0.0f) buildProg = 0.0f; if (buildProg > 1.0f) buildProg = 1.0f;
+
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glMatrixMode(GL_MODELVIEW);
@@ -1197,6 +1477,31 @@ void dibujarEsfera(Esfera& esfera) {
     // ligera oscilación de cámara para dar vida
     float bob = sinf(al_get_time() * 0.6f) * 2.2f;
     cam.panY += bob * 0.08f;
+    // --- Cámara dirigida por etapa de construcción (fly-in / foco) ---
+    if (esfera.buildMode) {
+        // presets por etapa
+        struct CamPreset { float rotX, rotY, distance, panX, panY; };
+        CamPreset presets[8] = {
+            { 0.35f,  0.0f, 900.0f, 0.0f, 0.0f }, // stage 0: vista lejana
+            { 0.28f,  0.6f, 820.0f, 0.0f, -10.0f }, // stage 1: conexiones
+            { 0.15f,  1.1f, 720.0f, 0.0f, -6.0f }, // stage 2: puntos/partículas
+            { 0.08f,  1.5f, 620.0f, 0.0f, -4.0f }, // stage 3: núcleo
+            { 0.06f,  1.35f, 640.0f, 0.0f, -3.0f }, // stage 4: fresnel shells
+            { 0.02f,  1.2f, 660.0f, 0.0f, -2.0f }, // stage 5: aurora
+            { -0.02f, 1.0f, 680.0f, 0.0f, -1.0f }, // stage 6: ring
+            { 0.0f,   0.9f, 700.0f, 0.0f, 0.0f }  // stage 7: final
+        };
+        int s = esfera.buildStage % 8;
+        int sNext = (s + 1) % 8;
+        float p = buildProg;
+        // interpolar entre preset s y sNext según progreso
+        CamPreset A = presets[s]; CamPreset B = presets[sNext];
+        cam.rotX = A.rotX + (B.rotX - A.rotX) * p;
+        cam.rotY = A.rotY + (B.rotY - A.rotY) * p;
+        cam.targetDistance = A.distance + (B.distance - A.distance) * p;
+        cam.panX = A.panX + (B.panX - A.panX) * p;
+        cam.panY = A.panY + (B.panY - A.panY) * p;
+    }
     // calcular posición de la cámara en coordenadas esféricas relativas al target (pan)
     float cx = cam.panX + sinf(cam.rotY) * cosf(cam.rotX) * cam.distance;
     float cy = cam.panY + sinf(cam.rotX) * cam.distance;
@@ -1204,123 +1509,395 @@ void dibujarEsfera(Esfera& esfera) {
     gluLookAt(cx, cy, cz, cam.panX, cam.panY, 0.0, 0.0, 1.0, 0.0);
 
     // Dibujar estrellas de fondo (ligero parpadeo)
-    draw_starfield(al_get_time());
+    if (!esfera.buildMode) draw_starfield(al_get_time(), 1.0f);
+    else {
+        if (esfera.buildStage == 0) draw_starfield(al_get_time(), buildProg);
+        else draw_starfield(al_get_time(), 1.0f);
+    }
 
     // Aplicar rotaciones de la esfera (convertir radianes a grados)
     const float RAD_TO_DEG = 180.0f / (float)ALLEGRO_PI;
     glRotatef(esfera.rotacionX * RAD_TO_DEG, 1.0f, 0.0f, 0.0f);
     glRotatef(esfera.rotacionY * RAD_TO_DEG, 0.0f, 1.0f, 0.0f);
 
-    // Dibujar conexiones entre puntos (líneas 3D)
-    const float distConexion = DISTANCIA_CONEXION;
-    glLineWidth(1.0f);
-    glBegin(GL_LINES);
-    for (size_t i = 0; i < esfera.puntos.size(); ++i) {
-        Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
-        for (size_t j = i + 1; j < esfera.puntos.size(); ++j) {
-            Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
-            float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 < distConexion * distConexion) {
-                float alpha = 0.12f * powf(esfera.progresoFormacion, 2.0f);
-                // color RGB según la dirección del punto para efecto arcoíris
-                float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
-                float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
-                float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
-                glColor4f(rn, gn, bn, alpha);
-                glVertex3f(pi.x, pi.y, pi.z);
-                glVertex3f(pj.x, pj.y, pj.z);
+    // Dibujar conexiones entre puntos (líneas 3D) - aparecerá si la etapa de construcción lo permite
+    // Wireframe sweep: pinta una malla simple por lon/lat revelando por ángulo en stage 1
+    if (esfera.buildMode && esfera.buildStage == 1) {
+        float sweepAngle = 2.0f * (float)ALLEGRO_PI * buildProg;
+        int latLines = 12;
+        int lonSegs = 80;
+        glLineWidth(1.0f);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        for (int lat = -latLines/2; lat <= latLines/2; ++lat) {
+            float latf = (float)lat / (float)(latLines/2);
+            float theta = latf * (float)ALLEGRO_PI * 0.5f; // -pi/2..pi/2
+            glBegin(GL_LINE_STRIP);
+            for (int li = 0; li <= lonSegs; ++li) {
+                float a = (float)li / (float)lonSegs * 2.0f * (float)ALLEGRO_PI;
+                if (a > sweepAngle) break;
+                float x = cosf(theta) * cosf(a) * RADIO_ESFERA;
+                float y = sinf(theta) * RADIO_ESFERA;
+                float z = cosf(theta) * sinf(a) * RADIO_ESFERA;
+                // color wave: modulador que recorre la malla
+                float ang = a;
+                float wave = 0.5f + 0.5f * sinf(ang * 3.0f - tiempo * 3.2f + latf * 1.6f);
+                float alpha = 0.10f * (0.5f + 0.5f * cosf(latf * 3.14f)) * (0.6f + 0.4f * wave) ;
+                glColor4f(0.75f * (0.7f + 0.3f * wave), 0.85f * (0.8f + 0.2f * wave), 1.0f * (0.8f + 0.2f * wave), alpha * buildProg);
+                glVertex3f(x, y, z);
             }
+            glEnd();
         }
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
-    glEnd();
 
-    // Pase additive para dar glow/neón a las conexiones (segunda pasada más ancha)
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    glLineWidth(3.0f);
-    glBegin(GL_LINES);
-    for (size_t i = 0; i < esfera.puntos.size(); ++i) {
-        Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
-        for (size_t j = i + 1; j < esfera.puntos.size(); ++j) {
-            Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
-            float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 < distConexion * distConexion) {
-                float tcol = 1.0f - (sqrtf(d2) / distConexion);
-                // color glow basado en la posición para mantener tema RGB
-                float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
-                float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
-                float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
-                float r = rn * tcol * 0.95f;
-                float g = gn * tcol * 0.95f;
-                float b = bn * tcol * 0.95f;
-                glColor4f(r, g, b, 0.16f * powf(esfera.progresoFormacion, 2.0f));
-                glVertex3f(pi.x, pi.y, pi.z);
-                glVertex3f(pj.x, pj.y, pj.z);
+    if (!esfera.buildMode || esfera.buildStage >= 1) {
+        const float distConexion = DISTANCIA_CONEXION;
+        // Preparar conteo de conexiones para revelado progresivo
+        int n = (int)esfera.puntos.size();
+        long long totalConns = (long long)n * (n - 1) / 2;
+        float revealCountF = totalConns;
+        if (esfera.buildMode && esfera.buildStage == 1) {
+            float prog = buildProg; // 0..1 durante la etapa
+            revealCountF = totalConns * prog;
+        }
+        long long revealFull = (long long)floorf(revealCountF);
+        float revealFrac = revealCountF - (float)revealFull;
+
+        glLineWidth(1.0f);
+        // dibujar líneas completas/ parciales
+        long long idx = 0;
+        glBegin(GL_LINES);
+        for (int i = 0; i < n; ++i) {
+            Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
+            for (int j = i + 1; j < n; ++j) {
+                Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
+                float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
+                float d2 = dx*dx + dy*dy + dz*dz;
+                if (d2 < distConexion * distConexion) {
+                    // determinar si este enlace debe dibujarse (total/partial/skip)
+                    if (!esfera.buildMode || esfera.buildStage > 1 || idx < revealFull) {
+                        float alpha = 0.12f * powf(esfera.progresoFormacion, 2.0f);
+                        float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
+                        float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
+                        float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
+                        glColor4f(rn, gn, bn, alpha);
+                        glVertex3f(pi.x, pi.y, pi.z);
+                        glVertex3f(pj.x, pj.y, pj.z);
+                    } else if (esfera.buildMode && esfera.buildStage == 1 && idx == revealFull) {
+                        // dibujar segmento parcial entre pi -> pj según revealFrac
+                        float frac = revealFrac;
+                        float mx = pi.x + (pj.x - pi.x) * frac;
+                        float my = pi.y + (pj.y - pi.y) * frac;
+                        float mz = pi.z + (pj.z - pi.z) * frac;
+                        float alpha = 0.12f * powf(esfera.progresoFormacion, 2.0f) * frac;
+                        float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
+                        float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
+                        float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
+                        glColor4f(rn, gn, bn, alpha);
+                        glVertex3f(pi.x, pi.y, pi.z);
+                        glVertex3f(mx, my, mz);
+                    }
+                }
+                idx++;
             }
         }
+        glEnd();
+
+        // Pase additive (glow) - usar misma lógica para revelar, pero más suave
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glLineWidth(3.0f);
+        idx = 0;
+        glBegin(GL_LINES);
+        for (int i = 0; i < n; ++i) {
+            Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
+            for (int j = i + 1; j < n; ++j) {
+                Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
+                float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
+                float d2 = dx*dx + dy*dy + dz*dz;
+                if (d2 < distConexion * distConexion) {
+                    if (!esfera.buildMode || esfera.buildStage > 1 || idx < revealFull) {
+                        float tcol = 1.0f - (sqrtf(d2) / distConexion);
+                        float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
+                        float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
+                        float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
+                        float r = rn * tcol * 0.95f;
+                        float g = gn * tcol * 0.95f;
+                        float b = bn * tcol * 0.95f;
+                        glColor4f(r, g, b, 0.16f * powf(esfera.progresoFormacion, 2.0f));
+                        glVertex3f(pi.x, pi.y, pi.z);
+                        glVertex3f(pj.x, pj.y, pj.z);
+                    } else if (esfera.buildMode && esfera.buildStage == 1 && idx == revealFull) {
+                        float frac = revealFrac;
+                        float mx = pi.x + (pj.x - pi.x) * frac;
+                        float my = pi.y + (pj.y - pi.y) * frac;
+                        float mz = pi.z + (pj.z - pi.z) * frac;
+                        float tcol = 1.0f - (sqrtf(d2) / distConexion);
+                        float rn = 0.5f + 0.5f * (pi.x / RADIO_ESFERA);
+                        float gn = 0.5f + 0.5f * (pi.y / RADIO_ESFERA);
+                        float bn = 0.5f + 0.5f * (pi.z / RADIO_ESFERA);
+                        float r = rn * tcol * 0.95f;
+                        float g = gn * tcol * 0.95f;
+                        float b = bn * tcol * 0.95f;
+                        glColor4f(r, g, b, 0.16f * powf(esfera.progresoFormacion, 2.0f) * frac);
+                        glVertex3f(pi.x, pi.y, pi.z);
+                        glVertex3f(mx, my, mz);
+                    }
+                }
+                idx++;
+            }
+        }
+        glEnd();
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glLineWidth(1.0f);
+
+        // Dibujar esferas blancas en los nodos que participan en conexiones (aparecen cuando su conexión está visible)
+        // Dibujar arcos eléctricos dinámicos (sobre las conexiones)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glLineWidth(2.0f);
+        for (size_t ai = 0; ai < esfera.arcs.size(); ++ai) {
+            const ElectricArc &arc = esfera.arcs[ai];
+            float alphaArc = 1.0f - fminf(1.0f, arc.life / (arc.ttl + 1e-6f));
+            alphaArc *= 0.9f;
+            if (esfera.buildMode && esfera.buildStage == 1) alphaArc *= buildProg;
+            if (alphaArc <= 0.001f) continue;
+            // draw subdivided/jagged arc for more complexity
+            std::vector<Punto3D> segs;
+            for (size_t s = 0; s < arc.pts.size(); ++s) segs.push_back(arc.pts[s]);
+            // simple subdivision loop
+            for (int sub = 0; sub < 2; ++sub) {
+                std::vector<Punto3D> next;
+                next.push_back(segs.front());
+                for (size_t i = 0; i+1 < segs.size(); ++i) {
+                    Punto3D a = segs[i]; Punto3D b = segs[i+1];
+                    Punto3D m; m.x = 0.5f*(a.x+b.x); m.y = 0.5f*(a.y+b.y); m.z = 0.5f*(a.z+b.z);
+                    // jitter
+                    float jitter = 4.0f * (1.0f - fabsf((float)i / (float)segs.size() - 0.5f));
+                    m.x += sinf(esfera.tiempo * 12.0f + i * 1.7f) * jitter;
+                    m.y += cosf(esfera.tiempo * 10.0f + i * 1.3f) * jitter * 0.6f;
+                    m.z += sinf(esfera.tiempo * 9.0f + i * 2.1f) * jitter * 0.5f;
+                    next.push_back(m);
+                    next.push_back(b);
+                }
+                segs.swap(next);
+            }
+            glBegin(GL_LINE_STRIP);
+            for (size_t s = 0; s < segs.size(); ++s) {
+                const Punto3D &pp = segs[s];
+                float tcol = 0.6f + 0.4f * (1.0f - (float)s / (float)segs.size());
+                glColor4f(0.6f * tcol, 0.9f * tcol, 1.0f * tcol, alphaArc * (0.6f + 0.4f * sinf(esfera.tiempo * 10.0f + ai * 1.7f + s)));
+                glVertex3f(pp.x, pp.y, pp.z);
+            }
+            glEnd();
+            // puntos brillantes en extremos y algunos fragmentos
+            glPointSize(4.0f);
+            glBegin(GL_POINTS);
+            if (!arc.pts.empty()) {
+                Punto3D p0 = arc.pts.front(); Punto3D p1 = arc.pts.back();
+                glColor4f(1.0f, 1.0f, 1.0f, alphaArc);
+                glVertex3f(p0.x, p0.y, p0.z);
+                glVertex3f(p1.x, p1.y, p1.z);
+            }
+            glEnd();
+        }
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        {
+            static GLUquadric* qConn = nullptr;
+            if (!qConn) qConn = gluNewQuadric();
+            glDisable(GL_LIGHTING);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            for (size_t i = 0; i < esfera.puntos.size(); ++i) {
+                Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
+                bool tieneConexion = false;
+                for (size_t j = 0; j < esfera.puntos.size(); ++j) {
+                    if (i == j) continue;
+                    Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
+                    float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
+                    if (dx*dx + dy*dy + dz*dz < distConexion * distConexion) { tieneConexion = true; break; }
+                }
+                if (tieneConexion) {
+                    // aparecer según avance de la etapa 1: si aún estamos revelando, hacemos un fade-in por cantidad de conexiones
+                    float nodeAlpha = 0.95f;
+                    if (esfera.buildMode && esfera.buildStage == 1) {
+                        // calcular cuántos nodos deberían estar visibles estimando por revealCountF
+                        // simple heurística: dejar aparecer nodos proporcionalmente
+                        nodeAlpha = buildProg;
+                    }
+                    glPushMatrix();
+                    glTranslatef(pi.x, pi.y, pi.z);
+                    float size = 2.2f + 2.6f * (400.0f / (400.0f + pi.z));
+                    glScalef(size, size, size);
+                    glColor4f(1.0f, 1.0f, 1.0f, nodeAlpha);
+                    gluSphere(qConn, 1.0, 8, 6);
+                    glPopMatrix();
+                }
+            }
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_LIGHTING);
+        }
     }
-    glEnd();
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(1.0f);
-    // Dibujar esferas blancas en los nodos que participan en conexiones
-    {
-        static GLUquadric* qConn = nullptr;
-        if (!qConn) qConn = gluNewQuadric();
+
+    // Dibujar puntos (como GL_POINTS, con tamaño según la profundidad)
+    // Partículas de ensamblaje: visibles en la etapa 2 (se mueven hacia los puntos objetivo)
+    if (esfera.buildMode && esfera.buildStage == 2) {
         glDisable(GL_LIGHTING);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        for (size_t i = 0; i < esfera.puntos.size(); ++i) {
-            Punto3D pi = rotarPunto(esfera.puntos[i], esfera.rotacionX, esfera.rotacionY);
-            bool tieneConexion = false;
-            for (size_t j = 0; j < esfera.puntos.size(); ++j) {
-                if (i == j) continue;
-                Punto3D pj = rotarPunto(esfera.puntos[j], esfera.rotacionX, esfera.rotacionY);
-                float dx = pi.x - pj.x; float dy = pi.y - pj.y; float dz = pi.z - pj.z;
-                if (dx*dx + dy*dy + dz*dz < distConexion * distConexion) { tieneConexion = true; break; }
+        glPointSize(2.5f);
+        glBegin(GL_POINTS);
+        for (size_t pi = 0; pi < esfera.particles.size(); ++pi) {
+            const Particle &p = esfera.particles[pi];
+            // alpha depende de proximidad al objetivo
+            float dx = p.tx - p.x; float dy = p.ty - p.y; float dz = p.tz - p.z;
+            float d = sqrtf(dx*dx + dy*dy + dz*dz);
+            float alpha = 1.0f - fminf(1.0f, d / 220.0f);
+            alpha *= buildProg;
+            float hue = 0.55f + 0.45f * ((float)(pi % 7) / 7.0f);
+            glColor4f(0.6f * hue, 0.9f * hue, 1.0f, 0.15f + 0.85f * alpha);
+            glVertex3f(p.x, p.y, p.z);
+        }
+        glEnd();
+        if (esfera.showTrails) {
+            // Draw particle trails (lines from prev -> current)
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glLineWidth(1.5f);
+            glBegin(GL_LINES);
+            for (size_t pi = 0; pi < esfera.particles.size(); ++pi) {
+                const Particle &p = esfera.particles[pi];
+                float dx = p.x - p.prevX; float dy = p.y - p.prevY; float dz = p.z - p.prevZ;
+                float len = sqrtf(dx*dx + dy*dy + dz*dz);
+                float a = fminf(1.0f, len * 0.06f) * buildProg * esfera.globalSpeedMul;
+                float hue = 0.6f + 0.4f * ((float)(pi % 5) / 5.0f);
+                glColor4f(0.5f * hue, 0.85f * hue, 1.0f, 0.08f + 0.65f * a);
+                glVertex3f(p.prevX, p.prevY, p.prevZ);
+                glVertex3f(p.x, p.y, p.z);
             }
-            if (tieneConexion) {
-                glPushMatrix();
-                glTranslatef(pi.x, pi.y, pi.z);
-                float size = 2.2f + 2.6f * (400.0f / (400.0f + pi.z));
-                glScalef(size, size, size);
-                glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-                gluSphere(qConn, 1.0, 8, 6);
-                glPopMatrix();
+            glEnd();
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        // Draw particle ribbons (thin quads) if enabled
+        if (esfera.showRibbons) {
+            // camera position already computed as cx,cy,cz
+            float camX = cx, camY = cy, camZ = cz;
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            for (size_t pi = 0; pi < esfera.particles.size(); ++pi) {
+                const Particle &p = esfera.particles[pi];
+                // compute direction
+                float dx = p.x - p.prevX; float dy = p.y - p.prevY; float dz = p.z - p.prevZ;
+                float len = sqrtf(dx*dx + dy*dy + dz*dz) + 1e-6f;
+                if (len < 0.001f) continue;
+                float dirx = dx/len, diry = dy/len, dirz = dz/len;
+                // view vector
+                float vx = camX - p.x, vy = camY - p.y, vz = camZ - p.z;
+                float vlen = sqrtf(vx*vx + vy*vy + vz*vz) + 1e-6f; vx/=vlen; vy/=vlen; vz/=vlen;
+                // perpendicular = cross(dir, view)
+                float px = diry * vz - dirz * vy;
+                float py = dirz * vx - dirx * vz;
+                float pz = dirx * vy - diry * vx;
+                float plen = sqrtf(px*px + py*py + pz*pz) + 1e-6f; px/=plen; py/=plen; pz/=plen;
+                float width = (0.6f + fminf(1.0f, len*0.06f)) * (0.5f + p.size*0.12f);
+                // quad corners
+                float x0 = p.prevX - px * width, y0 = p.prevY - py * width, z0 = p.prevZ - pz * width;
+                float x1 = p.prevX + px * width, y1 = p.prevY + py * width, z1 = p.prevZ + pz * width;
+                float x2 = p.x    - px * width, y2 = p.y    - py * width, z2 = p.z    - pz * width;
+                float x3 = p.x    + px * width, y3 = p.y    + py * width, z3 = p.z    + pz * width;
+                float alpha = 0.12f + 0.6f * buildProg;
+                float hue = 0.65f + 0.35f * ((float)(pi % 6) / 6.0f);
+                glBegin(GL_TRIANGLE_STRIP);
+                glColor4f(0.5f*hue, 0.85f*hue, 1.0f, alpha * 0.9f);
+                glVertex3f(x0,y0,z0);
+                glVertex3f(x1,y1,z1);
+                glColor4f(0.5f*hue, 0.85f*hue, 1.0f, alpha * 0.05f);
+                glVertex3f(x2,y2,z2);
+                glVertex3f(x3,y3,z3);
+                glEnd();
             }
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnable(GL_LIGHTING);
     }
 
-    // Dibujar puntos (como GL_POINTS, con tamaño según la profundidad)
-    glEnable(GL_POINT_SMOOTH);
-    for (const auto& p : esfera.puntos) {
-        Punto3D pd = rotarPunto(p, esfera.rotacionX, esfera.rotacionY);
-        float alpha = 0.9f * powf(esfera.progresoFormacion, 2.0f);
-        float sizeFactor = fmaxf(1.0f, 6.0f * (400.0f / (400.0f + pd.z)));
-        glPointSize(sizeFactor);
-        // color RGB según posición (mapear -R a +R)
-        float rn = 0.5f + 0.5f * (pd.x / RADIO_ESFERA);
-        float gn = 0.5f + 0.5f * (pd.y / RADIO_ESFERA);
-        float bn = 0.5f + 0.5f * (pd.z / RADIO_ESFERA);
-        glBegin(GL_POINTS);
-        glColor4f(rn, gn, bn, alpha);
-        glVertex3f(pd.x, pd.y, pd.z);
-        glEnd();
+    if (!esfera.buildMode || esfera.buildStage >= 2) {
+        glEnable(GL_POINT_SMOOTH);
+        int totalPoints = (int)esfera.puntos.size();
+        float revealF = (esfera.buildMode && esfera.buildStage == 2) ? (buildProg * totalPoints) : (float)totalPoints;
+        int fullPoints = (int)floorf(revealF);
+        float lastFrac = revealF - (float)fullPoints;
+
+        for (int pi = 0; pi < totalPoints; ++pi) {
+            const Punto3D& p = esfera.puntos[pi];
+            Punto3D pd = rotarPunto(p, esfera.rotacionX, esfera.rotacionY);
+            float alpha = 0.9f * powf(esfera.progresoFormacion, 2.0f);
+            float sizeFactor = fmaxf(1.0f, 6.0f * (400.0f / (400.0f + pd.z)));
+
+            float visible = 0.0f;
+            if (!esfera.buildMode || esfera.buildStage > 2) visible = 1.0f;
+            else if (esfera.buildStage == 2) {
+                if (pi < fullPoints) visible = 1.0f;
+                else if (pi == fullPoints) visible = lastFrac;
+                else visible = 0.0f;
+            } else visible = 0.0f;
+
+            if (visible <= 0.001f) continue;
+
+            // wave color modifier per-vertex
+            float nx = pd.x / (RADIO_ESFERA + 1e-6f);
+            float ny = pd.y / (RADIO_ESFERA + 1e-6f);
+            float nz = pd.z / (RADIO_ESFERA + 1e-6f);
+            float ang = atan2f(pd.z, pd.x);
+            float wave = 0.5f + 0.5f * sinf(ang * 3.0f - tiempo * 3.2f + ny * 2.0f);
+            glPointSize(sizeFactor * (0.35f + 0.65f * visible));
+            float rn = (0.5f + 0.5f * nx) * (0.7f + 0.3f * wave);
+            float gn = (0.5f + 0.5f * ny) * (0.8f + 0.25f * wave);
+            float bn = (0.5f + 0.5f * nz) * (0.9f + 0.2f * wave);
+            glBegin(GL_POINTS);
+            glColor4f(rn, gn, bn, alpha * visible);
+            glVertex3f(pd.x, pd.y, pd.z);
+            glEnd();
+
+            // spotlight scan highlight: add small additive dot when normal aligns with spotDir
+            if (!esfera.buildMode || esfera.buildStage >= 2) {
+                float sAng = fmodf(tiempo * 0.7f, 6.28318f);
+                float sx = cosf(sAng); float sy = 0.12f * sinf(tiempo * 0.3f); float sz = sinf(sAng);
+                // normalize spotDir
+                float mag = sqrtf(sx*sx + sy*sy + sz*sz) + 1e-6f; sx/=mag; sy/=mag; sz/=mag;
+                float dotp = nx * sx + ny * sy + nz * sz;
+                if (dotp > 0.92f) {
+                    float hi = (dotp - 0.92f) / 0.08f; hi = fminf(1.0f, hi);
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    glPointSize(8.0f * (0.6f + 0.8f * hi));
+                    glBegin(GL_POINTS);
+                    glColor4f(1.0f, 0.95f, 0.85f, 0.12f * hi);
+                    glVertex3f(pd.x, pd.y, pd.z);
+                    glEnd();
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                }
+            }
+        }
     }
 
     // Núcleo volumétrico interno (nube/partículas)
-    draw_core(esfera, tiempo);
+    if (!esfera.buildMode || esfera.buildStage >= 3) draw_core(esfera, tiempo);
     // Fresnel/rim shells para dar borde y profundidad
-    draw_fresnel_shells(esfera, tiempo);
+    if (!esfera.buildMode || esfera.buildStage >= 4) draw_fresnel_shells(esfera, tiempo);
     // Agregar resplandores y cintas tipo aurora + capas de humo para acabado visual
-    draw_aurora_glow(esfera, tiempo);
-    draw_outer_ring(esfera, tiempo);
+    if (!esfera.buildMode || esfera.buildStage >= 5) draw_aurora_glow(esfera, tiempo);
+    if (!esfera.buildMode || esfera.buildStage >= 6) draw_outer_ring(esfera, tiempo);
 
-    // Efectos extra para acabado profesional: viñeta
-    draw_vignette(VIGNETTE_INTENSITY);
+    // Efectos extra para acabado profesional: viñeta (última etapa)
+    if (!esfera.buildMode || esfera.buildStage >= 7) {
+        float vig = VIGNETTE_INTENSITY;
+        if (esfera.buildMode && esfera.buildStage == 7) vig *= buildProg;
+        draw_vignette(vig);
+    }
 }
 
 //Main y Lógica de IPC (Inter-Process Communication)
@@ -1471,6 +2048,37 @@ int main() {
                     globalCamera = Camera();
                     std::cout << "Camara reseteada\n";
                     break;
+                case ALLEGRO_KEY_B: // toggle build/construction mode
+                    esfera.buildMode = !esfera.buildMode;
+                    // resetear temporizador/etapa cuando se activa
+                    if (esfera.buildMode) { esfera.buildStage = 0; esfera.buildStageTimer = 0.0f; }
+                    std::cout << "Build mode " << (esfera.buildMode ? "ON" : "OFF") << "\n";
+                    break;
+                case ALLEGRO_KEY_T: // toggle trails
+                    esfera.showTrails = !esfera.showTrails;
+                    std::cout << "Trails " << (esfera.showTrails ? "ON" : "OFF") << "\n";
+                    break;
+                case ALLEGRO_KEY_R: // toggle ribbons
+                    esfera.showRibbons = !esfera.showRibbons;
+                    std::cout << "Ribbons " << (esfera.showRibbons ? "ON" : "OFF") << "\n";
+                    break;
+                case ALLEGRO_KEY_H: // toggle HUD (console output)
+                    esfera.showHUD = !esfera.showHUD;
+                    std::cout << "HUD " << (esfera.showHUD ? "ON" : "OFF") << "\n";
+                    break;
+                case ALLEGRO_KEY_EQUALS: // increase speed (uses '=')
+                    esfera.globalSpeedMul *= 1.25f;
+                    std::cout << "Speed x" << esfera.globalSpeedMul << "\n";
+                    break;
+                case ALLEGRO_KEY_MINUS: // decrease speed
+                    esfera.globalSpeedMul *= 0.8f;
+                    std::cout << "Speed x" << esfera.globalSpeedMul << "\n";
+                    break;
+                case ALLEGRO_KEY_N: // next build stage
+                    esfera.buildStage = (esfera.buildStage + 1) % esfera.maxBuildStages;
+                    esfera.buildStageTimer = 0.0f;
+                    std::cout << "Stage -> " << esfera.buildStage << "\n";
+                    break;
                 case ALLEGRO_KEY_1: // toggle instances
                     showInstances = !showInstances;
                     if (showInstances && instances.empty()) {
@@ -1498,8 +2106,8 @@ int main() {
             al_clear_to_color(al_map_rgb(8, 8, 10));
 
             dibujarEsfera(esfera);
-            // aplicar bloom simple sin FBO
-            apply_simple_bloom(DISPLAY_W, DISPLAY_H);
+            // aplicar bloom simple sin FBO sólo en la última etapa o si el modo está desactivado
+            if (!esfera.buildMode || esfera.buildStage >= 7) apply_simple_bloom(DISPLAY_W, DISPLAY_H);
 
             al_flip_display();
         }
